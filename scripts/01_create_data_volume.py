@@ -29,89 +29,30 @@ CACHE_DIR = f"{VOL}/hf_cache"
 @app.function(
     image=image,
     volumes={VOL: vol},
-    timeout=14400,  # 4 hours should be plenty
+    timeout=28800,  # 8 hours should be plenty
     cpu=8.0,  # More CPUs for batch tokenization
     memory=32768,  # 32GB for larger batches
     secrets=[modal.Secret.from_name("huggingface-secret")]
 )
-def materialize_fineweb_edu(
-    train_tokens: int = 20_000_000_000,
-    val_tokens: int = 100_000_000,
-    test_tokens: int = 100_000_000,
-    sample_name: str = "sample-100BT",
+def tokenize_existing_dataset(
+    dataset_name: str = "fineweb-edu",
+    dataset_local_path: str = f"{BASE_DIR}/fineweb-edu",
     tokenizer_name: str = "meta-llama/Llama-3.2-1B",
+    use_fast: bool = True,
     shuffle_buffer_size: int = 10_000,
     shuffle_seed: int = 42,
     estimated_tokens_per_doc: int = 999,  # Pull this from get_avg_token_count_of_document
 ) -> None:
     """
-    Download FineWeb-Edu and create train/val/test splits.
+    Tokenize an existing dataset.
 
     Args:
-        train_tokens: Training set size in tokens (default: 20B)
-        val_tokens: Validation set size in tokens (default: 100M)
-        test_tokens: Test set size in tokens (default: 100M)
-        sample_name: FineWeb-Edu sample to use
-        tokenizer_name: HuggingFace tokenizer to use
-        shuffle_buffer_size: Shuffle buffer size
-        shuffle_seed: Random seed
-        estimated_tokens_per_doc: Average tokens per doc (from sampling)
+        dataset_name: The name of the dataset to tokenize. (default: "fineweb-edu")
+        dataset_local_path: The local path to the dataset to tokenize. (default: f"{BASE_DIR}/fineweb-edu")
+        tokenizer_name: HuggingFace tokenizer to use. (default: "meta-llama/Llama-3.2-1B")
     """
-    # Setup cache
-    os.makedirs(BASE_DIR, exist_ok=True)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    os.environ["HF_DATASETS_CACHE"] = CACHE_DIR
-    os.environ["HF_HOME"] = f"{VOL}/hf_home"
-    os.environ["HF_HUB_CACHE"] = f"{os.environ['HF_HOME']}/hub"
-
-    from datasets import load_dataset, Dataset, DatasetDict
-    from transformers import AutoTokenizer
-
-    total_target_tokens = train_tokens + val_tokens + test_tokens
-    print(f"Target tokens: train={train_tokens:,} val={val_tokens:,} test={test_tokens:,} total={total_target_tokens:,}")
-
-    # Estimate documents needed (with 20% buffer)
-    estimated_docs = int((total_target_tokens / estimated_tokens_per_doc) * 1.2)
-    print(f"Estimated documents needed: {estimated_docs:,} (based on {estimated_tokens_per_doc} tokens/doc)")
-
-    # Load dataset
-    print(f"Loading FineWeb-Edu {sample_name} in streaming mode...")
-    ds = load_dataset(
-        "HuggingFaceFW/fineweb-edu",
-        name=sample_name,
-        split="train",
-        streaming=True,
-        cache_dir=CACHE_DIR,
-    )
-
-    # Shuffle
-    print(f"Shuffling with buffer size {shuffle_buffer_size:,}...")
-    ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=shuffle_seed)
-
-    # Download documents (fast, no tokenization yet)
-    print(f"Downloading {estimated_docs:,} documents...")
-    documents = []
-    start_time = time.time()
-    last_report = start_time
-
-    for i, doc in enumerate(ds):
-        documents.append(doc)
-
-        current_time = time.time()
-        if current_time - last_report >= 60:  # Report every minute
-            elapsed = current_time - start_time
-            docs_per_sec = (i + 1) / elapsed
-            eta_seconds = (estimated_docs - i - 1) / docs_per_sec if docs_per_sec > 0 else 0
-            print(f"Downloaded {i+1:,}/{estimated_docs:,} docs ({docs_per_sec:.1f} docs/sec, ETA: {eta_seconds/60:.1f}m)")
-            last_report = current_time
-
-        if i + 1 >= estimated_docs:
-            break
-
-    download_time = time.time() - start_time
-    print(f"✓ Downloaded {len(documents):,} documents in {download_time:.1f}s ({len(documents)/download_time:.1f} docs/sec)")
-
-    # Load tokenizer
+    raise NotImplementedError("Not implemented yet")
+    # some code to finish later
     print(f"Loading tokenizer: {tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_name,
@@ -253,6 +194,198 @@ def materialize_fineweb_edu(
     print(f"✓ Manifest: {manifest_path}")
     print(f"✓ Total time: {total_time/60:.1f} minutes")
 
+
+@app.function(
+    image=image,
+    volumes={VOL: vol},
+    timeout=28800,  # 8 hours should be plenty
+    cpu=8.0,  # More CPUs for batch tokenization
+    memory=32768,  # 32GB for larger batches
+    secrets=[modal.Secret.from_name("huggingface-secret")]
+)
+def materialize_fineweb_edu_untokenized(
+    train_tokens: int = 20_000_000_000,
+    val_tokens: int = 100_000_000,
+    test_tokens: int = 100_000_000,
+    sample_name: str = "sample-100BT",
+    shuffle_buffer_size: int = 10_000,
+    shuffle_seed: int = 42,
+    estimated_tokens_per_doc: int = 999,  # Pull this from get_avg_token_count_of_document
+) -> None:
+    """
+    Download FineWeb-Edu and create train/val/test splits without tokenization.
+
+    Args:
+        train_tokens: Training set size in tokens (default: 20B)
+        val_tokens: Validation set size in tokens (default: 100M)
+        test_tokens: Test set size in tokens (default: 100M)
+        sample_name: FineWeb-Edu sample to use
+        shuffle_buffer_size: Shuffle buffer size
+        shuffle_seed: Random seed
+        estimated_tokens_per_doc: Average tokens per doc (from sampling)
+    """
+    # Setup cache
+    os.makedirs(BASE_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.environ["HF_DATASETS_CACHE"] = CACHE_DIR
+    os.environ["HF_HOME"] = f"{VOL}/hf_home"
+    os.environ["HF_HUB_CACHE"] = f"{os.environ['HF_HOME']}/hub"
+
+    from datasets import load_dataset, Dataset, DatasetDict
+    from transformers import AutoTokenizer
+
+    total_target_tokens = train_tokens + val_tokens + test_tokens
+    print(f"Target tokens: train={train_tokens:,} val={val_tokens:,} test={test_tokens:,} total={total_target_tokens:,}")
+
+    # Estimate documents needed (with 25% buffer)
+    estimated_docs = int((total_target_tokens / estimated_tokens_per_doc) * 1.25)
+    print(f"Estimated documents needed: {estimated_docs:,} (based on {estimated_tokens_per_doc} tokens/doc)")
+
+    # Load dataset
+    print(f"Loading FineWeb-Edu {sample_name} in streaming mode...")
+    ds = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name=sample_name,
+        split="train",
+        streaming=True,
+        cache_dir=CACHE_DIR,
+    )
+
+    # Shuffle
+    print(f"Shuffling with buffer size {shuffle_buffer_size:,}...")
+    ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=shuffle_seed)
+
+    # Download documents (fast, no tokenization yet)
+    print(f"Downloading {estimated_docs:,} documents...")
+    documents = []
+    start_time = time.time()
+    last_report = start_time
+
+    for i, doc in enumerate(ds):
+        documents.append(doc)
+
+        current_time = time.time()
+        if current_time - last_report >= 60:  # Report every minute
+            elapsed = current_time - start_time
+            docs_per_sec = (i + 1) / elapsed
+            eta_seconds = (estimated_docs - i - 1) / docs_per_sec if docs_per_sec > 0 else 0
+            print(f"Downloaded {i+1:,}/{estimated_docs:,} docs ({docs_per_sec:.1f} docs/sec, ETA: {eta_seconds/60:.1f}m)")
+            last_report = current_time
+
+        if i + 1 >= estimated_docs:
+            break
+
+    download_time = time.time() - start_time
+    print(f"✓ Downloaded {len(documents):,} documents in {download_time:.1f}s ({len(documents)/download_time:.1f} docs/sec)")
+
+    # Split into train/val/test
+    # Calculate what fraction of documents should go to each split
+    # (assumes documents are roughly equal in token count)
+    train_frac = train_tokens / total_target_tokens
+    val_frac = val_tokens / total_target_tokens
+    test_frac = test_tokens / total_target_tokens
+
+    print(f"Split fractions: train={train_frac:.4f} ({train_frac*100:.2f}%), "
+          f"val={val_frac:.4f} ({val_frac*100:.2f}%), "
+          f"test={test_frac:.4f} ({test_frac*100:.2f}%)")
+
+    # Calculate document counts for each split
+    total_docs = len(documents)
+    train_count = int(total_docs * train_frac)
+    val_count = int(total_docs * val_frac)
+    test_count = int(total_docs * test_frac)
+
+    # Adjust to ensure we use all documents
+    # Give any remainder to training set
+    remainder = total_docs - (train_count + val_count + test_count)
+    train_count += remainder
+
+    print(f"Document counts: train={train_count:,}, val={val_count:,}, test={test_count:,}")
+    print(f"Estimated tokens: train={train_count * estimated_tokens_per_doc:,}, "
+          f"val={val_count * estimated_tokens_per_doc:,}, "
+          f"test={test_count * estimated_tokens_per_doc:,}")
+
+    # Split the documents
+    train_docs = documents[:train_count]
+    val_docs = documents[train_count:train_count + val_count]
+    test_docs = documents[train_count + val_count:train_count + val_count + test_count]
+
+    print(f"Actual splits: train={len(train_docs):,}, val={len(val_docs):,}, test={len(test_docs):,}")
+
+    # Create datasets
+    print("Creating dataset splits...")
+    train_ds = Dataset.from_list(train_docs)
+    val_ds = Dataset.from_list(val_docs)
+    test_ds = Dataset.from_list(test_docs)
+
+    dataset_dict = DatasetDict({
+        "train": train_ds,
+        "validation": val_ds,
+        "test": test_ds,
+    })
+
+    # Save
+    save_path = f"{BASE_DIR}/{sample_name}_raw_{len(documents)//1_000_000}M_docs"
+
+    print(f"Saving to {save_path}...")
+    save_start = time.time()
+    dataset_dict.save_to_disk(save_path)
+    save_time = time.time() - save_start
+
+    total_time = time.time() - start_time
+
+    # Create manifest
+    meta = {
+        "source": "HuggingFaceFW/fineweb-edu",
+        "config": sample_name,
+        "format": "raw_text",
+        "target_tokens": {
+            "train": train_tokens,
+            "validation": val_tokens,
+            "test": test_tokens,
+            "total": total_target_tokens,
+        },
+        "estimated_tokens_per_doc": estimated_tokens_per_doc,
+        "splits": {
+            "train": {
+                "num_documents": len(train_docs),
+                "estimated_tokens": len(train_docs) * estimated_tokens_per_doc,
+            },
+            "validation": {
+                "num_documents": len(val_docs),
+                "estimated_tokens": len(val_docs) * estimated_tokens_per_doc,
+            },
+            "test": {
+                "num_documents": len(test_docs),
+                "estimated_tokens": len(test_docs) * estimated_tokens_per_doc,
+            },
+        },
+        "total_documents": len(documents),
+        "shuffle_buffer_size": shuffle_buffer_size,
+        "shuffle_seed": shuffle_seed,
+        "paths": {
+            "save_to_disk": save_path,
+            "hf_cache": CACHE_DIR,
+        },
+        "timing": {
+            "download_seconds": download_time,
+            "save_seconds": save_time,
+            "total_seconds": total_time,
+        },
+        "created_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+    }
+
+    manifest_path = f"{BASE_DIR}/manifest_{sample_name}_raw_{len(documents)//1_000_000}M_docs.json"
+    with open(manifest_path, "w") as f:
+        json.dump(meta, f, indent=2)
+
+    print("\n✓ Saved raw dataset with splits")
+    print(f"✓ Path: {save_path}")
+    print(f"✓ Manifest: {manifest_path}")
+    print(f"✓ Download time: {download_time/60:.1f} minutes")
+    print(f"✓ Save time: {save_time/60:.1f} minutes")
+    print(f"✓ Total time: {total_time/60:.1f} minutes")
+
 @app.function(
     image=image,
     volumes={VOL: vol},
@@ -366,5 +499,5 @@ def token_count_stats():
 
 @app.local_entrypoint()
 def main():
-    materialize_fineweb_edu.remote()
+    materialize_fineweb_edu_untokenized.remote()
     print(f"Volume '{VOLUME_NAME}' now contains fineweb-edu at {BASE_DIR}")
