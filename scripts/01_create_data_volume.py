@@ -198,9 +198,9 @@ def tokenize_existing_dataset(
 @app.function(
     image=image,
     volumes={VOL: vol},
-    timeout=28800,  # 8 hours should be plenty
-    cpu=8.0,  # More CPUs for batch tokenization
-    memory=32768,  # 32GB for larger batches
+    timeout=28800,  # 8 hours
+    cpu=8.0,
+    memory=32768,
     secrets=[modal.Secret.from_name("huggingface-secret")],
     retries=0,
 )
@@ -212,11 +212,12 @@ def materialize_fineweb_edu_untokenized(
     shuffle_buffer_size: int = 10_000,
     shuffle_seed: int = 42,
     estimated_tokens_per_doc: int = 999,
-    chunk_size: int = 100_000,  # Process in chunks to save memory
+    chunk_size: int = 100_000,
+    checkpoint_interval: int = 300,  # Save checkpoint every 5 minutes
 ) -> None:
     """
     Download FineWeb-Edu and create train/val/test splits without tokenization.
-    Memory-efficient version that writes directly to disk in chunks.
+    Memory-efficient version with checkpointing for resumability.
     """
     # Setup cache
     os.makedirs(BASE_DIR, exist_ok=True)
@@ -225,7 +226,7 @@ def materialize_fineweb_edu_untokenized(
     os.environ["HF_HOME"] = f"{VOL}/hf_home"
     os.environ["HF_HUB_CACHE"] = f"{os.environ['HF_HOME']}/hub"
 
-    from datasets import load_dataset, Dataset, DatasetDict
+    from datasets import load_dataset, Dataset, DatasetDict, concatenate_datasets
     import tempfile
     import shutil
 
@@ -252,8 +253,44 @@ def materialize_fineweb_edu_untokenized(
     
     print(f"Target document counts: train={train_count:,}, val={val_count:,}, test={test_count:,}")
 
+    # Setup checkpoint and temp directories
+    checkpoint_dir = f"{BASE_DIR}/.checkpoints/{sample_name}_{shuffle_seed}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = f"{checkpoint_dir}/progress.json"
+    
+    train_temp = f"{checkpoint_dir}/train"
+    val_temp = f"{checkpoint_dir}/val"
+    test_temp = f"{checkpoint_dir}/test"
+    os.makedirs(train_temp, exist_ok=True)
+    os.makedirs(val_temp, exist_ok=True)
+    os.makedirs(test_temp, exist_ok=True)
+
+    # Check for existing checkpoint
+    resume_from = None
+    if os.path.exists(checkpoint_path):
+        print(f"\n🔄 Found existing checkpoint at {checkpoint_path}")
+        with open(checkpoint_path, 'r') as f:
+            checkpoint_data = json.load(f)
+        
+        # Verify checkpoint matches current run parameters
+        if (checkpoint_data.get("sample_name") == sample_name and
+            checkpoint_data.get("shuffle_seed") == shuffle_seed and
+            checkpoint_data.get("estimated_docs") == estimated_docs):
+            
+            resume_from = checkpoint_data
+            print(f"✓ Resuming from document {resume_from['doc_count']:,}")
+            print(f"  Train chunks: {resume_from['train_saved']}, Val chunks: {resume_from['val_saved']}, Test chunks: {resume_from['test_saved']}")
+        else:
+            print("⚠ Checkpoint parameters don't match, starting fresh")
+            # Clean up old checkpoint
+            shutil.rmtree(checkpoint_dir)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            os.makedirs(train_temp, exist_ok=True)
+            os.makedirs(val_temp, exist_ok=True)
+            os.makedirs(test_temp, exist_ok=True)
+
     # Load dataset
-    print(f"Loading FineWeb-Edu {sample_name} in streaming mode...")
+    print(f"\nLoading FineWeb-Edu {sample_name} in streaming mode...")
     ds = load_dataset(
         "HuggingFaceFW/fineweb-edu",
         name=sample_name,
@@ -266,29 +303,28 @@ def materialize_fineweb_edu_untokenized(
     print(f"Shuffling with buffer size {shuffle_buffer_size:,}...")
     ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=shuffle_seed)
 
-    # Create temporary directories for each split
-    temp_dir = tempfile.mkdtemp(dir=VOL)
-    train_temp = f"{temp_dir}/train"
-    val_temp = f"{temp_dir}/val"
-    test_temp = f"{temp_dir}/test"
-    os.makedirs(train_temp, exist_ok=True)
-    os.makedirs(val_temp, exist_ok=True)
-    os.makedirs(test_temp, exist_ok=True)
+    # Initialize counters
+    if resume_from:
+        train_saved = resume_from['train_saved']
+        val_saved = resume_from['val_saved']
+        test_saved = resume_from['test_saved']
+        doc_count = resume_from['doc_count']
+        start_doc = doc_count
+        print(f"Skipping first {start_doc:,} documents...")
+    else:
+        train_saved = 0
+        val_saved = 0
+        test_saved = 0
+        doc_count = 0
+        start_doc = 0
 
-    # Download and split documents in chunks
-    print(f"Downloading and splitting documents (chunk_size={chunk_size:,})...")
-    start_time = time.time()
-    last_report = start_time
-    
     train_docs = []
     val_docs = []
     test_docs = []
-    train_saved = 0
-    val_saved = 0
-    test_saved = 0
     
-    doc_count = 0
-    chunk_num = 0
+    start_time = time.time()
+    last_report = start_time
+    last_checkpoint = start_time
     
     def save_chunk(docs, split_dir, split_name, saved_count):
         """Save a chunk of documents to disk."""
@@ -296,12 +332,38 @@ def materialize_fineweb_edu_untokenized(
             return saved_count
         
         chunk_ds = Dataset.from_list(docs)
-        chunk_path = f"{split_dir}/chunk_{saved_count:06d}.arrow"
+        chunk_path = f"{split_dir}/chunk_{saved_count:06d}"
         chunk_ds.save_to_disk(chunk_path)
-        print(f"  Saved {split_name} chunk {saved_count} ({len(docs):,} docs) to {chunk_path}")
+        print(f"  Saved {split_name} chunk {saved_count} ({len(docs):,} docs)")
         return saved_count + 1
     
+    def save_checkpoint():
+        """Save progress checkpoint."""
+        checkpoint_data = {
+            "sample_name": sample_name,
+            "shuffle_seed": shuffle_seed,
+            "estimated_docs": estimated_docs,
+            "doc_count": doc_count,
+            "train_saved": train_saved,
+            "val_saved": val_saved,
+            "test_saved": test_saved,
+            "train_count": train_count,
+            "val_count": val_count,
+            "test_count": test_count,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+        }
+        with open(checkpoint_path, 'w') as f:
+            json.dump(checkpoint_data, f, indent=2)
+        vol.commit()  # Commit volume to persist checkpoint
+    
+    # Download and split documents in chunks
+    print(f"\nDownloading and splitting documents (chunk_size={chunk_size:,})...")
+    
     for i, doc in enumerate(ds):
+        # Skip documents we've already processed
+        if i < start_doc:
+            continue
+        
         doc_count = i + 1
         
         # Assign to appropriate split
@@ -322,13 +384,21 @@ def materialize_fineweb_edu_untokenized(
                 test_docs = []
         else:
             # We have enough for all splits
+            print(f"\n✓ Collected all required documents!")
             break
         
-        # Progress reporting
         current_time = time.time()
+        
+        # Save checkpoint at regular intervals
+        if current_time - last_checkpoint >= checkpoint_interval:
+            print(f"💾 Saving checkpoint at document {doc_count:,}...")
+            save_checkpoint()
+            last_checkpoint = current_time
+        
+        # Progress reporting
         if current_time - last_report >= 60:
             elapsed = current_time - start_time
-            docs_per_sec = doc_count / elapsed
+            docs_per_sec = (doc_count - start_doc) / elapsed if elapsed > 0 else 0
             eta_seconds = (estimated_docs - doc_count) / docs_per_sec if docs_per_sec > 0 else 0
             print(f"Downloaded {doc_count:,}/{estimated_docs:,} docs ({docs_per_sec:.1f} docs/sec, ETA: {eta_seconds/60:.1f}m)")
             print(f"  Current: train={len(train_docs) + train_saved*chunk_size:,}, "
@@ -345,6 +415,9 @@ def materialize_fineweb_edu_untokenized(
     if test_docs:
         test_saved = save_chunk(test_docs, test_temp, "test", test_saved)
     
+    # Save final checkpoint
+    save_checkpoint()
+    
     download_time = time.time() - start_time
     print(f"\n✓ Downloaded {doc_count:,} documents in {download_time:.1f}s ({doc_count/download_time:.1f} docs/sec)")
 
@@ -354,16 +427,16 @@ def materialize_fineweb_edu_untokenized(
     
     def load_split_from_chunks(split_dir):
         """Load all chunks from a split directory."""
-        chunk_paths = sorted([f for f in os.listdir(split_dir) if f.endswith('.arrow')])
+        chunk_paths = sorted([f for f in os.listdir(split_dir) if os.path.isdir(f"{split_dir}/{f}")])
         if not chunk_paths:
             return Dataset.from_list([])
         
+        print(f"  Loading {len(chunk_paths)} chunks...")
         datasets = []
         for chunk_path in chunk_paths:
             chunk_ds = Dataset.load_from_disk(f"{split_dir}/{chunk_path}")
             datasets.append(chunk_ds)
         
-        from datasets import concatenate_datasets
         return concatenate_datasets(datasets)
     
     print("Loading train split...")
@@ -394,9 +467,9 @@ def materialize_fineweb_edu_untokenized(
     dataset_dict.save_to_disk(save_path)
     save_time = time.time() - save_start
     
-    # Clean up temp directory
-    print("Cleaning up temporary files...")
-    shutil.rmtree(temp_dir)
+    # Clean up checkpoint directory
+    print("Cleaning up checkpoint directory...")
+    shutil.rmtree(checkpoint_dir)
     
     total_time = time.time() - start_time
 
@@ -454,7 +527,8 @@ def materialize_fineweb_edu_untokenized(
     print(f"✓ Concatenate time: {concat_time/60:.1f} minutes")
     print(f"✓ Save time: {save_time/60:.1f} minutes")
     print(f"✓ Total time: {total_time/60:.1f} minutes")
-    vol.commit() # commit the final volume before the container spins down
+    
+    vol.commit()  # Final commit
 
 
 @app.function(

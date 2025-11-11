@@ -256,7 +256,8 @@ class LlamaForCausalLM(nn.Module):
         if exclude_embeddings:
             n_params -= self.model.embed_tokens.weight.numel()
         return n_params
-
+    
+    @torch.inference_mode()
     def generate(
         self,
         input_ids: torch.Tensor,

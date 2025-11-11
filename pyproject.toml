@@ -11,6 +11,7 @@ dependencies = [
     "datasets>=2.19.0",
     "accelerate>=0.30.0",
     "wandb>=0.17.0",
+    "cyclopts>=4.2.3",
 ]
 
 [project.optional-dependencies]
