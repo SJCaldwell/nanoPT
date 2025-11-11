@@ -201,7 +201,8 @@ def tokenize_existing_dataset(
     timeout=28800,  # 8 hours should be plenty
     cpu=8.0,  # More CPUs for batch tokenization
     memory=32768,  # 32GB for larger batches
-    secrets=[modal.Secret.from_name("huggingface-secret")]
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    retries=0,
 )
 def materialize_fineweb_edu_untokenized(
     train_tokens: int = 20_000_000_000,
@@ -210,19 +211,12 @@ def materialize_fineweb_edu_untokenized(
     sample_name: str = "sample-100BT",
     shuffle_buffer_size: int = 10_000,
     shuffle_seed: int = 42,
-    estimated_tokens_per_doc: int = 999,  # Pull this from get_avg_token_count_of_document
+    estimated_tokens_per_doc: int = 999,
+    chunk_size: int = 100_000,  # Process in chunks to save memory
 ) -> None:
     """
     Download FineWeb-Edu and create train/val/test splits without tokenization.
-
-    Args:
-        train_tokens: Training set size in tokens (default: 20B)
-        val_tokens: Validation set size in tokens (default: 100M)
-        test_tokens: Test set size in tokens (default: 100M)
-        sample_name: FineWeb-Edu sample to use
-        shuffle_buffer_size: Shuffle buffer size
-        shuffle_seed: Random seed
-        estimated_tokens_per_doc: Average tokens per doc (from sampling)
+    Memory-efficient version that writes directly to disk in chunks.
     """
     # Setup cache
     os.makedirs(BASE_DIR, exist_ok=True)
@@ -232,7 +226,8 @@ def materialize_fineweb_edu_untokenized(
     os.environ["HF_HUB_CACHE"] = f"{os.environ['HF_HOME']}/hub"
 
     from datasets import load_dataset, Dataset, DatasetDict
-    from transformers import AutoTokenizer
+    import tempfile
+    import shutil
 
     total_target_tokens = train_tokens + val_tokens + test_tokens
     print(f"Target tokens: train={train_tokens:,} val={val_tokens:,} test={test_tokens:,} total={total_target_tokens:,}")
@@ -240,6 +235,22 @@ def materialize_fineweb_edu_untokenized(
     # Estimate documents needed (with 25% buffer)
     estimated_docs = int((total_target_tokens / estimated_tokens_per_doc) * 1.25)
     print(f"Estimated documents needed: {estimated_docs:,} (based on {estimated_tokens_per_doc} tokens/doc)")
+
+    # Calculate split fractions
+    train_frac = train_tokens / total_target_tokens
+    val_frac = val_tokens / total_target_tokens
+    test_frac = test_tokens / total_target_tokens
+    
+    print(f"Split fractions: train={train_frac:.4f} ({train_frac*100:.2f}%), "
+          f"val={val_frac:.4f} ({val_frac*100:.2f}%), "
+          f"test={test_frac:.4f} ({test_frac*100:.2f}%)")
+    
+    # Calculate document counts for each split
+    train_count = int(estimated_docs * train_frac)
+    val_count = int(estimated_docs * val_frac)
+    test_count = int(estimated_docs * test_frac)
+    
+    print(f"Target document counts: train={train_count:,}, val={val_count:,}, test={test_count:,}")
 
     # Load dataset
     print(f"Loading FineWeb-Edu {sample_name} in streaming mode...")
@@ -255,83 +266,138 @@ def materialize_fineweb_edu_untokenized(
     print(f"Shuffling with buffer size {shuffle_buffer_size:,}...")
     ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=shuffle_seed)
 
-    # Download documents (fast, no tokenization yet)
-    print(f"Downloading {estimated_docs:,} documents...")
-    documents = []
+    # Create temporary directories for each split
+    temp_dir = tempfile.mkdtemp(dir=VOL)
+    train_temp = f"{temp_dir}/train"
+    val_temp = f"{temp_dir}/val"
+    test_temp = f"{temp_dir}/test"
+    os.makedirs(train_temp, exist_ok=True)
+    os.makedirs(val_temp, exist_ok=True)
+    os.makedirs(test_temp, exist_ok=True)
+
+    # Download and split documents in chunks
+    print(f"Downloading and splitting documents (chunk_size={chunk_size:,})...")
     start_time = time.time()
     last_report = start_time
-
+    
+    train_docs = []
+    val_docs = []
+    test_docs = []
+    train_saved = 0
+    val_saved = 0
+    test_saved = 0
+    
+    doc_count = 0
+    chunk_num = 0
+    
+    def save_chunk(docs, split_dir, split_name, saved_count):
+        """Save a chunk of documents to disk."""
+        if len(docs) == 0:
+            return saved_count
+        
+        chunk_ds = Dataset.from_list(docs)
+        chunk_path = f"{split_dir}/chunk_{saved_count:06d}.arrow"
+        chunk_ds.save_to_disk(chunk_path)
+        print(f"  Saved {split_name} chunk {saved_count} ({len(docs):,} docs) to {chunk_path}")
+        return saved_count + 1
+    
     for i, doc in enumerate(ds):
-        documents.append(doc)
-
-        current_time = time.time()
-        if current_time - last_report >= 60:  # Report every minute
-            elapsed = current_time - start_time
-            docs_per_sec = (i + 1) / elapsed
-            eta_seconds = (estimated_docs - i - 1) / docs_per_sec if docs_per_sec > 0 else 0
-            print(f"Downloaded {i+1:,}/{estimated_docs:,} docs ({docs_per_sec:.1f} docs/sec, ETA: {eta_seconds/60:.1f}m)")
-            last_report = current_time
-
-        if i + 1 >= estimated_docs:
+        doc_count = i + 1
+        
+        # Assign to appropriate split
+        if len(train_docs) + train_saved * chunk_size < train_count:
+            train_docs.append(doc)
+            if len(train_docs) >= chunk_size:
+                train_saved = save_chunk(train_docs, train_temp, "train", train_saved)
+                train_docs = []
+        elif len(val_docs) + val_saved * chunk_size < val_count:
+            val_docs.append(doc)
+            if len(val_docs) >= chunk_size:
+                val_saved = save_chunk(val_docs, val_temp, "val", val_saved)
+                val_docs = []
+        elif len(test_docs) + test_saved * chunk_size < test_count:
+            test_docs.append(doc)
+            if len(test_docs) >= chunk_size:
+                test_saved = save_chunk(test_docs, test_temp, "test", test_saved)
+                test_docs = []
+        else:
+            # We have enough for all splits
             break
-
+        
+        # Progress reporting
+        current_time = time.time()
+        if current_time - last_report >= 60:
+            elapsed = current_time - start_time
+            docs_per_sec = doc_count / elapsed
+            eta_seconds = (estimated_docs - doc_count) / docs_per_sec if docs_per_sec > 0 else 0
+            print(f"Downloaded {doc_count:,}/{estimated_docs:,} docs ({docs_per_sec:.1f} docs/sec, ETA: {eta_seconds/60:.1f}m)")
+            print(f"  Current: train={len(train_docs) + train_saved*chunk_size:,}, "
+                  f"val={len(val_docs) + val_saved*chunk_size:,}, "
+                  f"test={len(test_docs) + test_saved*chunk_size:,}")
+            last_report = current_time
+    
+    # Save remaining documents
+    print("\nSaving final chunks...")
+    if train_docs:
+        train_saved = save_chunk(train_docs, train_temp, "train", train_saved)
+    if val_docs:
+        val_saved = save_chunk(val_docs, val_temp, "val", val_saved)
+    if test_docs:
+        test_saved = save_chunk(test_docs, test_temp, "test", test_saved)
+    
     download_time = time.time() - start_time
-    print(f"✓ Downloaded {len(documents):,} documents in {download_time:.1f}s ({len(documents)/download_time:.1f} docs/sec)")
+    print(f"\n✓ Downloaded {doc_count:,} documents in {download_time:.1f}s ({doc_count/download_time:.1f} docs/sec)")
 
-    # Split into train/val/test
-    # Calculate what fraction of documents should go to each split
-    # (assumes documents are roughly equal in token count)
-    train_frac = train_tokens / total_target_tokens
-    val_frac = val_tokens / total_target_tokens
-    test_frac = test_tokens / total_target_tokens
-
-    print(f"Split fractions: train={train_frac:.4f} ({train_frac*100:.2f}%), "
-          f"val={val_frac:.4f} ({val_frac*100:.2f}%), "
-          f"test={test_frac:.4f} ({test_frac*100:.2f}%)")
-
-    # Calculate document counts for each split
-    total_docs = len(documents)
-    train_count = int(total_docs * train_frac)
-    val_count = int(total_docs * val_frac)
-    test_count = int(total_docs * test_frac)
-
-    # Adjust to ensure we use all documents
-    # Give any remainder to training set
-    remainder = total_docs - (train_count + val_count + test_count)
-    train_count += remainder
-
-    print(f"Document counts: train={train_count:,}, val={val_count:,}, test={test_count:,}")
-    print(f"Estimated tokens: train={train_count * estimated_tokens_per_doc:,}, "
-          f"val={val_count * estimated_tokens_per_doc:,}, "
-          f"test={test_count * estimated_tokens_per_doc:,}")
-
-    # Split the documents
-    train_docs = documents[:train_count]
-    val_docs = documents[train_count:train_count + val_count]
-    test_docs = documents[train_count + val_count:train_count + val_count + test_count]
-
-    print(f"Actual splits: train={len(train_docs):,}, val={len(val_docs):,}, test={len(test_docs):,}")
-
-    # Create datasets
-    print("Creating dataset splits...")
-    train_ds = Dataset.from_list(train_docs)
-    val_ds = Dataset.from_list(val_docs)
-    test_ds = Dataset.from_list(test_docs)
-
+    # Load all chunks and concatenate
+    print("\nLoading and concatenating chunks...")
+    concat_start = time.time()
+    
+    def load_split_from_chunks(split_dir):
+        """Load all chunks from a split directory."""
+        chunk_paths = sorted([f for f in os.listdir(split_dir) if f.endswith('.arrow')])
+        if not chunk_paths:
+            return Dataset.from_list([])
+        
+        datasets = []
+        for chunk_path in chunk_paths:
+            chunk_ds = Dataset.load_from_disk(f"{split_dir}/{chunk_path}")
+            datasets.append(chunk_ds)
+        
+        from datasets import concatenate_datasets
+        return concatenate_datasets(datasets)
+    
+    print("Loading train split...")
+    train_ds = load_split_from_chunks(train_temp)
+    print(f"  Train: {len(train_ds):,} documents")
+    
+    print("Loading val split...")
+    val_ds = load_split_from_chunks(val_temp)
+    print(f"  Val: {len(val_ds):,} documents")
+    
+    print("Loading test split...")
+    test_ds = load_split_from_chunks(test_temp)
+    print(f"  Test: {len(test_ds):,} documents")
+    
+    concat_time = time.time() - concat_start
+    
+    # Create final dataset dict
     dataset_dict = DatasetDict({
         "train": train_ds,
         "validation": val_ds,
         "test": test_ds,
     })
-
-    # Save
-    save_path = f"{BASE_DIR}/{sample_name}_raw_{len(documents)//1_000_000}M_docs"
-
-    print(f"Saving to {save_path}...")
+    
+    # Save final dataset
+    save_path = f"{BASE_DIR}/{sample_name}_raw_{doc_count//1_000_000}M_docs"
+    print(f"\nSaving final dataset to {save_path}...")
     save_start = time.time()
     dataset_dict.save_to_disk(save_path)
     save_time = time.time() - save_start
-
+    
+    # Clean up temp directory
+    print("Cleaning up temporary files...")
+    shutil.rmtree(temp_dir)
+    
     total_time = time.time() - start_time
 
     # Create manifest
@@ -348,34 +414,36 @@ def materialize_fineweb_edu_untokenized(
         "estimated_tokens_per_doc": estimated_tokens_per_doc,
         "splits": {
             "train": {
-                "num_documents": len(train_docs),
-                "estimated_tokens": len(train_docs) * estimated_tokens_per_doc,
+                "num_documents": len(train_ds),
+                "estimated_tokens": len(train_ds) * estimated_tokens_per_doc,
             },
             "validation": {
-                "num_documents": len(val_docs),
-                "estimated_tokens": len(val_docs) * estimated_tokens_per_doc,
+                "num_documents": len(val_ds),
+                "estimated_tokens": len(val_ds) * estimated_tokens_per_doc,
             },
             "test": {
-                "num_documents": len(test_docs),
-                "estimated_tokens": len(test_docs) * estimated_tokens_per_doc,
+                "num_documents": len(test_ds),
+                "estimated_tokens": len(test_ds) * estimated_tokens_per_doc,
             },
         },
-        "total_documents": len(documents),
+        "total_documents": doc_count,
         "shuffle_buffer_size": shuffle_buffer_size,
         "shuffle_seed": shuffle_seed,
+        "chunk_size": chunk_size,
         "paths": {
             "save_to_disk": save_path,
             "hf_cache": CACHE_DIR,
         },
         "timing": {
             "download_seconds": download_time,
+            "concatenate_seconds": concat_time,
             "save_seconds": save_time,
             "total_seconds": total_time,
         },
         "created_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
     }
 
-    manifest_path = f"{BASE_DIR}/manifest_{sample_name}_raw_{len(documents)//1_000_000}M_docs.json"
+    manifest_path = f"{BASE_DIR}/manifest_{sample_name}_raw_{doc_count//1_000_000}M_docs.json"
     with open(manifest_path, "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -383,8 +451,11 @@ def materialize_fineweb_edu_untokenized(
     print(f"✓ Path: {save_path}")
     print(f"✓ Manifest: {manifest_path}")
     print(f"✓ Download time: {download_time/60:.1f} minutes")
+    print(f"✓ Concatenate time: {concat_time/60:.1f} minutes")
     print(f"✓ Save time: {save_time/60:.1f} minutes")
     print(f"✓ Total time: {total_time/60:.1f} minutes")
+    vol.commit() # commit the final volume before the container spins down
+
 
 @app.function(
     image=image,
