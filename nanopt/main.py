@@ -7,36 +7,45 @@ from nanopt.optimizers.adamw import create_optimizer, get_lr_scheduler
 import torch.distributed as dist
 import os
 import torch
+from dataclasses import dataclass
 
 app = App("nanopt")
 
+@dataclass
+class TrainConfig:
+    seed: int = 42
+    project_name: str = "nanopt-llama-3.2-1b-pretrain"
+    learning_rate: float = 3e-4
+    warmup_steps: int = 1000
+    max_steps: int = 10000
+    per_device_batch_size: int = 16
+    batch_size: int = 16
+    tokenizer_name: str = "meta-llama/Llama-3.2-1B"
+    max_length: int = 4096
+    num_workers: int = 4
+    dataset_path: str = "data/fineweb-edu"
+    checkpoint_interval: int = 1000
+
 @app.default
 def train_model(
-    seed: int = 42,
-    project_name: str = "nanopt-llama-3.2-1b-pretrain",
-    learning_rate: float = 3e-4,
-    warmup_steps: int = 1000,
-    max_steps: int = 10000,
-    per_device_batch_size: int = 16,
-    batch_size: int = 16,
-    tokenizer_name: str = "meta-llama/Llama-3.2-1B",
-    max_length: int = 4096,
-    num_workers: int = 4,
-    dataset_path: str = "data/fineweb-edu",
+    config: TrainConfig,
 ) -> None:
-    set_seed_all(seed)
+    print(f"Training with config: {config}")
+    print(config.__dict__)
+    exit()
+    set_seed_all(config.seed)
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
 
-    assert batch_size % per_device_batch_size == 0 # check even gradient accumulation
-    gradient_accumulation_steps = batch_size / per_device_batch_size
+    assert config.batch_size % config.per_device_batch_size == 0 # check even gradient accumulation
+    gradient_accumulation_steps = config.batch_size / config.per_device_batch_size
 
     if global_rank == 0:
         #put all the config in here, which should be everything passed to the app. 
         config = {
         }
-        wandb.init(project=project_name)
+        wandb.init(project=config.project_name)
     
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
