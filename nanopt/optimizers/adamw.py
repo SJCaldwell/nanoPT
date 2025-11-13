@@ -7,7 +7,7 @@ def get_lr_scheduler(
     warmup_steps: int,
     max_steps: int,
     min_lr_ratio: float = 0.1,
-) -> callable:
+) -> torch.optim.lr_scheduler.LambdaLR:
     def lr_lambda(current_step: int) -> float:
         base_lr = optimizer.defaults['lr']
 

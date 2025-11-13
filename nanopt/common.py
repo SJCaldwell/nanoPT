@@ -75,5 +75,6 @@ def get_gpu_memory() -> Dict[str, float]:
     return gpu_memory
 
 def ddp_setup() -> None:
+    # check if nccl is available
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
