@@ -1,5 +1,5 @@
 import wandb
-from cyclopts import App
+import yaml
 from nanopt.common import ddp_setup, set_seed_all, save_checkpoint
 from nanopt.models.llama import LlamaForCausalLM, LlamaConfig
 from nanopt.data import get_dataloaders
@@ -7,18 +7,17 @@ from nanopt.optimizers.adamw import create_optimizer, get_lr_scheduler
 import torch.distributed as dist
 import os
 import torch
-from dataclasses import dataclass
+from pydantic import BaseModel
+import sys
+import math
 
-app = App("nanopt")
 
-@dataclass
-class TrainConfig:
+class TrainConfig(BaseModel):
     seed: int = 42
     project_name: str = "nanopt-llama-3.2-1b-pretrain"
     checkpoint_dir: str = "checkpoints"
     learning_rate: float = 3e-4
     warmup_steps: int = 1000
-    max_steps: int = 10000
     per_device_batch_size: int = 16 # tune based on GPU size
     tokens_per_batch: int = 1_000_000 # million seems to be the pretraining token batch size
     tokenizer_name: str = "meta-llama/Llama-3.2-1B"
@@ -27,7 +26,6 @@ class TrainConfig:
     dataset_path: str = "data/fineweb-edu"
     checkpoint_interval: int = 1000
 
-@app.default
 def train_model(
     config: TrainConfig,
 ) -> None:
@@ -36,12 +34,16 @@ def train_model(
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
 
+    print(config)
+
     if world_size > 1 and not torch.cuda.is_available():
         raise ValueError("Distributed training requires CUDA")
 
     # get total number of gpus in the world (assume homogeneity)
 
-    gradient_accumulation_steps = config.tokens_per_batch // (config.per_device_batch_size * world_size * config.max * config.sequence_length)
+    gradient_accumulation_steps = config.tokens_per_batch // (config.per_device_batch_size * world_size * config.sequence_length)
+    # need to calculate max steps based on target number of tokens to give to the lr scheduler
+    max_steps = 20_000_000_000 // config.tokens_per_batch
 
     if global_rank == 0:
         #put all the config in here, which should be everything passed to the app. 
@@ -53,17 +55,10 @@ def train_model(
     
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    model = LlamaForCausalLM(LlamaConfig(
-        vocab_size=config.vocab_size,
-        hidden_size=config.hidden_size,
-        intermediate_size=config.intermediate_size,
-        num_hidden_layers=config.num_hidden_layers,
-        num_attention_heads=config.num_attention_heads,
-        num_key_value_heads=config.num_key_value_heads,
-    ))
+    model = LlamaForCausalLM(LlamaConfig()) # default config is for Llama 3.2 1B
     model.to(device)
     optimizer = create_optimizer(model, lr=config.learning_rate)
-    scheduler = get_lr_scheduler(optimizer, warmup_steps=config.warmup_steps, max_steps=config.max_steps)
+    scheduler = get_lr_scheduler(optimizer, warmup_steps=config.warmup_steps, max_steps=max_steps)
 
     train_dataloader, val_dataloader = get_dataloaders(
         dataset_path=config.dataset_path,
@@ -81,7 +76,7 @@ def train_model(
         batch = {k: v.to(device) for k, v in batch.items()}
         output = model(**batch)
         loss = output["loss"] / gradient_accumulation_steps
-        output.loss.backward()
+        loss.backward()
         if (i + 1) % gradient_accumulation_steps == 0:
             optimizer.step()
             scheduler.step()
@@ -90,8 +85,10 @@ def train_model(
                 wandb.log({
                     "loss": loss.item(),
                     "lr": scheduler.get_last_lr()[0],
+                    "global_step": i,
+                    "real_step": real_step,
                 })
-                if i % config.checkpoint_interval == 0:
+                if real_step % config.checkpoint_interval == 0:
                     save_checkpoint(
                         checkpoint_dir=config.checkpoint_dir,
                         model=model,
@@ -100,14 +97,22 @@ def train_model(
                         step=real_step,
                         loss=loss.item(),
                     )
+    
     if global_rank == 0:
         wandb.finish()
 
 def main():
-    print("Training NanoPT...")
-    #ddp_setup()
-    app()
-    #dist.destroy_process_group()
+    print("Validating config...")
+    if len(sys.argv) > 1:
+        config_path = sys.argv[1]
+        with open(config_path) as f:
+            config = yaml.load(f, Loader=yaml.FullLoader)
+            train_config = TrainConfig.model_validate(config)
+    else:
+        train_config = TrainConfig()
+    ddp_setup()
+    train_model(train_config)
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
