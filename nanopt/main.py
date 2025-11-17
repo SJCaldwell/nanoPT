@@ -1,3 +1,4 @@
+from sympy import Float
 import wandb
 import yaml
 from nanopt.common import ddp_setup, set_seed_all, save_checkpoint
@@ -10,6 +11,7 @@ import torch
 from pydantic import BaseModel
 import sys
 import math
+from torch.utils.data import DataLoader
 
 
 class TrainConfig(BaseModel):
@@ -25,6 +27,29 @@ class TrainConfig(BaseModel):
     num_workers: int = 4
     dataset_path: str = "data/fineweb-edu"
     checkpoint_interval: int = 1000
+    eval_interval: int = 10
+
+
+def evaluate_model(
+    model: LlamaForCausalLM,
+    dataloader: DataLoader,
+    device: torch.device,
+    num_samples: int = 100,
+) -> float:
+    model.eval()
+    total_loss = 0
+    total_tokens = 0
+    with torch.no_grad():
+        for (i, batch) in enumerate(dataloader):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            output = model(**batch)
+            loss = output["loss"]
+            total_loss += loss.item() * batch["input_ids"].shape[1]
+            total_tokens += batch["input_ids"].shape[1]
+            if i == num_samples: # stop after num_samples samples are evaluated
+                break
+        avg_loss = total_loss / total_tokens
+        return avg_loss
 
 def train_model(
     config: TrainConfig,
@@ -97,7 +122,22 @@ def train_model(
                         step=real_step,
                         loss=loss.item(),
                     )
-    
+                if real_step % config.eval_interval == 0:
+                    val_loss = evaluate_model(model, val_dataloader, device)
+                    wandb.log({
+                        "val_loss": val_loss,
+                        "real_step": real_step,
+                    })
+                    example_generation = model.generate("An interesting fact about the human brain", device=device, max_new_tokens=100)
+                    wandb.log({
+                        "example_generation_brain": example_generation,
+                        "real_step": real_step,
+                    })
+                    example_generation = model.generate("It was a dark and stormy night", device=device, max_new_tokens=100)
+                    wandb.log({
+                        "example_generation_stormy": example_generation,
+                        "real_step": real_step,
+                    })
     if global_rank == 0:
         wandb.finish()
 

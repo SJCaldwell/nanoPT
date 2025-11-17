@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from typing import Optional
 
 from torch.onnx.ops import rotary_embedding
+from transformers import AutoTokenizer
 
 
 @dataclass
@@ -185,7 +186,6 @@ class LlamaModel(nn.Module):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
         # Initialize weights
         self.apply(self._init_weights)
 
@@ -229,6 +229,8 @@ class LlamaForCausalLM(nn.Module):
         # Tie weights
         self.lm_head.weight = self.model.embed_tokens.weight
 
+        self.tokenizer_name = "meta-llama/Llama-3.2-1B"
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -258,7 +260,7 @@ class LlamaForCausalLM(nn.Module):
         return n_params
     
     @torch.inference_mode()
-    def generate(
+    def _generate(
         self,
         input_ids: torch.Tensor,
         max_new_tokens: int = 100,
@@ -315,17 +317,26 @@ class LlamaForCausalLM(nn.Module):
             attention_mask = torch.cat((attention_mask, torch.ones((batch_size, 1), device=input_ids.device, dtype=torch.bool)), dim=-1)
 
         return input_ids
-
-    def decode(self, input_ids: torch.Tensor, tokenizer) -> str:
+    
+    def generate(self, prompt: str, device: torch.device, max_new_tokens: int = 100) -> str:
+        """Generate text using greedy search or sampling.
+        
+        Args:
+            prompt: The prompt to generate text from.
+            device: The device to generate on.
+            max_new_tokens: The maximum number of new tokens to generate.
+        """
+        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        input_ids = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        output_ids = self._generate(input_ids, max_new_tokens)
+        return str(tokenizer.decode(output_ids[0].tolist(), skip_special_tokens=True))
+    
+    def decode(self, input_ids: torch.Tensor) -> str:
         """Decode the generated tokens into a string."""
-        return tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True)
+        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
+        return str(tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True))
 
 if __name__ == "__main__":
-    from transformers import AutoTokenizer
     config = LlamaConfig()
     model = LlamaForCausalLM(config)
-    print(model.num_parameters())
-    print(model.num_parameters(exclude_embeddings=True))
-    generated = model.generate(torch.tensor([[config.bos_token_id]]))
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-    print(f"Generated: {model.decode(generated, tokenizer)}")
+    print(model.generate("An interesting fact about the human brain", device=torch.device("cpu"), max_new_tokens=100))

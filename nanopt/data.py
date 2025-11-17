@@ -1,3 +1,4 @@
+#TODO: Handle special tokens manually so we can put multiple documents in a single batch
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from transformers import AutoTokenizer
