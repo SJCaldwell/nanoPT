@@ -230,6 +230,7 @@ class LlamaForCausalLM(nn.Module):
         self.lm_head.weight = self.model.embed_tokens.weight
 
         self.tokenizer_name = "meta-llama/Llama-3.2-1B"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
 
     def forward(
         self,
@@ -326,15 +327,13 @@ class LlamaForCausalLM(nn.Module):
             device: The device to generate on.
             max_new_tokens: The maximum number of new tokens to generate.
         """
-        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
-        input_ids = tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt", add_special_tokens=True).to(device)
         output_ids = self._generate(input_ids, max_new_tokens)
-        return str(tokenizer.decode(output_ids[0].tolist(), skip_special_tokens=True))
+        return str(self.tokenizer.decode(output_ids[0].tolist(), skip_special_tokens=True))
     
     def decode(self, input_ids: torch.Tensor) -> str:
         """Decode the generated tokens into a string."""
-        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
-        return str(tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True))
+        return str(self.tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True))
 
 if __name__ == "__main__":
     config = LlamaConfig()

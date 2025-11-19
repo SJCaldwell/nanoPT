@@ -95,24 +95,27 @@ def train_model(
         rank=global_rank,
     )
     model.train()
-
+    accumulated_loss = 0.0
     for (i, batch) in enumerate(train_dataloader):
         real_step = (i + 1) // gradient_accumulation_steps
         batch = {k: v.to(device) for k, v in batch.items()}
         output = model(**batch)
-        loss = output["loss"] / gradient_accumulation_steps
-        loss.backward()
+        scaled_loss = output["loss"] / gradient_accumulation_steps
+        accumulated_loss += output["loss"].item()
+        scaled_loss.backward()
         if (i + 1) % gradient_accumulation_steps == 0:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
             if global_rank == 0:
+                avg_loss = accumulated_loss / gradient_accumulation_steps
                 wandb.log({
-                    "loss": loss.item(),
+                    "loss": avg_loss,
                     "lr": scheduler.get_last_lr()[0],
                     "global_step": i,
                     "real_step": real_step,
                 })
+                accumulated_loss = 0.0
                 if real_step % config.checkpoint_interval == 0:
                     save_checkpoint(
                         checkpoint_dir=config.checkpoint_dir,
@@ -120,7 +123,7 @@ def train_model(
                         optimizer=optimizer,
                         scheduler=scheduler, # type: ignore
                         step=real_step,
-                        loss=loss.item(),
+                        loss=avg_loss,
                     )
                 if real_step % config.eval_interval == 0:
                     val_loss = evaluate_model(model, val_dataloader, device)
