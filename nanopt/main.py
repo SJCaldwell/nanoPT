@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import sys
 import math
 from torch.utils.data import DataLoader
+from nanopt.profiling.track_mfu import MFUTracker
 
 
 class TrainConfig(BaseModel):
@@ -28,6 +29,7 @@ class TrainConfig(BaseModel):
     dataset_path: str = "data/fineweb-edu"
     checkpoint_interval: int = 1000
     eval_interval: int = 10
+    mfu_log_interval: int = 10
 
 
 def evaluate_model(
@@ -82,6 +84,7 @@ def train_model(
 
     model = LlamaForCausalLM(LlamaConfig()) # default config is for Llama 3.2 1B
     model.to(device)
+    mfu_tracker = MFUTracker(model, config.per_device_batch_size * config.sequence_length * world_size, device, dtype=torch.float32)
     optimizer = create_optimizer(model, lr=config.learning_rate)
     scheduler = get_lr_scheduler(optimizer, warmup_steps=config.warmup_steps, max_steps=max_steps)
 
@@ -95,6 +98,7 @@ def train_model(
         rank=global_rank,
     )
     model.train()
+    mfu_tracker.start()
     accumulated_loss = 0.0
     for (i, batch) in enumerate(train_dataloader):
         real_step = (i + 1) // gradient_accumulation_steps
@@ -103,6 +107,14 @@ def train_model(
         scaled_loss = output["loss"] / gradient_accumulation_steps
         accumulated_loss += output["loss"].item()
         scaled_loss.backward()
+        mfu_tracker.update()
+        if global_rank == 0 and i % config.mfu_log_interval == 0:
+            mfu_metrics = mfu_tracker.get_metrics()
+            wandb.log({
+                **mfu_metrics,
+                "global_step": i,
+                "real_step": real_step,
+            })
         if (i + 1) % gradient_accumulation_steps == 0:
             optimizer.step()
             scheduler.step()
@@ -117,6 +129,7 @@ def train_model(
                 })
                 accumulated_loss = 0.0
                 if real_step % config.checkpoint_interval == 0:
+                    mfu_tracker.pause()
                     save_checkpoint(
                         checkpoint_dir=config.checkpoint_dir,
                         model=model,
@@ -125,7 +138,9 @@ def train_model(
                         step=real_step,
                         loss=avg_loss,
                     )
+                    mfu_tracker.resume()
                 if real_step % config.eval_interval == 0:
+                    mfu_tracker.pause()
                     val_loss = evaluate_model(model, val_dataloader, device)
                     wandb.log({
                         "val_loss": val_loss,
@@ -141,6 +156,7 @@ def train_model(
                         "example_generation_stormy": example_generation,
                         "real_step": real_step,
                     })
+                    mfu_tracker.resume()
     if global_rank == 0:
         wandb.finish()
 
