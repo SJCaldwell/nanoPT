@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
-from torch.onnx.ops import rotary_embedding
 from transformers import AutoTokenizer
 
 

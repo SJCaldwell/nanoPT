@@ -1,4 +1,3 @@
-from sympy import Float
 import wandb
 import yaml
 from nanopt.common import ddp_setup, set_seed_all, save_checkpoint
@@ -13,6 +12,7 @@ import sys
 import math
 from torch.utils.data import DataLoader
 from nanopt.profiling.track_mfu import MFUTracker
+import contextlib
 
 
 class TrainConfig(BaseModel):
@@ -30,6 +30,10 @@ class TrainConfig(BaseModel):
     checkpoint_interval: int = 1000
     eval_interval: int = 10
     mfu_log_interval: int = 10
+    enable_profiling: bool = False
+    profiling_dir: str = "training"
+    profiling_wait_steps: int = 10 # skip initial warmup
+    profiling_active_steps: int = 20 # profile these
 
 
 def evaluate_model(
@@ -40,17 +44,15 @@ def evaluate_model(
 ) -> float:
     model.eval()
     total_loss = 0
-    total_tokens = 0
     with torch.no_grad():
         for (i, batch) in enumerate(dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
             output = model(**batch)
             loss = output["loss"]
             total_loss += loss.item() * batch["input_ids"].shape[1]
-            total_tokens += batch["input_ids"].shape[1]
             if i == num_samples: # stop after num_samples samples are evaluated
                 break
-        avg_loss = total_loss / total_tokens
+        avg_loss = total_loss / num_samples
         return avg_loss
 
 def train_model(
@@ -97,66 +99,91 @@ def train_model(
         world_size=world_size,
         rank=global_rank,
     )
+
+    if config.enable_profiling and global_rank == 0:
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=config.profiling_wait_steps,
+                warmup=5,
+                active=config.profiling_active_steps,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(config.profiling_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        profiler_context = profiler
+    else:
+        profiler_context = contextlib.nullcontext() # type: ignore
+
     model.train()
     mfu_tracker.start()
     accumulated_loss = 0.0
-    for (i, batch) in enumerate(train_dataloader):
-        real_step = (i + 1) // gradient_accumulation_steps
-        batch = {k: v.to(device) for k, v in batch.items()}
-        output = model(**batch)
-        scaled_loss = output["loss"] / gradient_accumulation_steps
-        accumulated_loss += output["loss"].item()
-        scaled_loss.backward()
-        mfu_tracker.update()
-        if global_rank == 0 and i % config.mfu_log_interval == 0:
-            mfu_metrics = mfu_tracker.get_metrics()
-            wandb.log({
-                **mfu_metrics,
-                "global_step": i,
-                "real_step": real_step,
-            })
-        if (i + 1) % gradient_accumulation_steps == 0:
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            if global_rank == 0:
-                avg_loss = accumulated_loss / gradient_accumulation_steps
+    with profiler_context as profiler:
+        for (i, batch) in enumerate(train_dataloader):
+            real_step = (i + 1) // gradient_accumulation_steps
+            batch = {k: v.to(device) for k, v in batch.items()}
+            output = model(**batch)
+            scaled_loss = output["loss"] / gradient_accumulation_steps
+            accumulated_loss += output["loss"].item()
+            scaled_loss.backward()
+            mfu_tracker.update()
+            if global_rank == 0 and i % config.mfu_log_interval == 0:
+                mfu_metrics = mfu_tracker.get_metrics()
                 wandb.log({
-                    "loss": avg_loss,
-                    "lr": scheduler.get_last_lr()[0],
+                    **mfu_metrics,
                     "global_step": i,
                     "real_step": real_step,
                 })
-                accumulated_loss = 0.0
-                if real_step % config.checkpoint_interval == 0:
-                    mfu_tracker.pause()
-                    save_checkpoint(
-                        checkpoint_dir=config.checkpoint_dir,
-                        model=model,
-                        optimizer=optimizer,
-                        scheduler=scheduler, # type: ignore
-                        step=real_step,
-                        loss=avg_loss,
-                    )
-                    mfu_tracker.resume()
-                if real_step % config.eval_interval == 0:
-                    mfu_tracker.pause()
-                    val_loss = evaluate_model(model, val_dataloader, device)
+            if (i + 1) % gradient_accumulation_steps == 0:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                if global_rank == 0:
+                    avg_loss = accumulated_loss / gradient_accumulation_steps
                     wandb.log({
-                        "val_loss": val_loss,
+                        "loss": avg_loss,
+                        "lr": scheduler.get_last_lr()[0],
+                        "global_step": i,
                         "real_step": real_step,
                     })
-                    example_generation = model.generate("An interesting fact about the human brain", device=device, max_new_tokens=100)
-                    wandb.log({
-                        "example_generation_brain": example_generation,
-                        "real_step": real_step,
-                    })
-                    example_generation = model.generate("It was a dark and stormy night", device=device, max_new_tokens=100)
-                    wandb.log({
-                        "example_generation_stormy": example_generation,
-                        "real_step": real_step,
-                    })
-                    mfu_tracker.resume()
+                    accumulated_loss = 0.0
+                    if real_step % config.checkpoint_interval == 0:
+                        mfu_tracker.pause()
+                        save_checkpoint(
+                            checkpoint_dir=config.checkpoint_dir,
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler, # type: ignore
+                            step=real_step,
+                            loss=avg_loss,
+                        )
+                        mfu_tracker.resume()
+                    if real_step % config.eval_interval == 0:
+                        mfu_tracker.pause()
+                        val_loss = evaluate_model(model, val_dataloader, device)
+                        wandb.log({
+                            "val_loss": val_loss,
+                            "real_step": real_step,
+                        })
+                        example_generation = model.generate("An interesting fact about the human brain", device=device, max_new_tokens=100)
+                        wandb.log({
+                            "example_generation_brain": example_generation,
+                            "real_step": real_step,
+                        })
+                        example_generation = model.generate("It was a dark and stormy night", device=device, max_new_tokens=100)
+                        wandb.log({
+                            "example_generation_stormy": example_generation,
+                            "real_step": real_step,
+                        })
+                        mfu_tracker.resume()
+            if config.enable_profiling and global_rank == 0:
+                profiler.step()
     if global_rank == 0:
         wandb.finish()
 

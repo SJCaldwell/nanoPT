@@ -3,7 +3,6 @@ project_name: "nanopt-llama-3.2-1b-pretrain"
 learning_rate: 3e-4
 warmup_steps: 1000
 per_device_batch_size: 1
-batch_size: 1
 tokenizer_name: "meta-llama/Llama-3.2-1B"
 max_length: 4096
 num_workers: 10
@@ -11,3 +10,4 @@ dataset_path: "/data/datasets/fineweb-edu/sample-100BT_raw_25M_docs"
 checkpoint_interval: 1000
 eval_interval: 10
 mfu_log_interval: 10
+profiling_dir: "training/profiling/"

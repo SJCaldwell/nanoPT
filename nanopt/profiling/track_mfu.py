@@ -1,4 +1,3 @@
-from pyexpat import model
 import time
 import torch
 from typing import Dict, Optional
