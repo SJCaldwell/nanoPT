@@ -10,4 +10,5 @@ dataset_path: "/data/datasets/fineweb-edu/sample-100BT_raw_25M_docs"
 checkpoint_interval: 1000
 eval_interval: 10
 mfu_log_interval: 10
-profiling_dir: "training/profiling/"
+enable_profiling: true
+profiling_dir: "/training/profiling/"

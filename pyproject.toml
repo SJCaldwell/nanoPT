@@ -61,3 +61,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
+
+[dependency-groups]
+dev = [
+    "tensorboard>=2.20.0",
+    "torch-tb-profiler>=0.4.3",
+]
