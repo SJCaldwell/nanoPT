@@ -6,6 +6,16 @@ from pathlib import Path
 from typing import Dict, Optional
 import torch.distributed as dist
 
+def get_dtype(dtype_str: str) -> torch.dtype:
+    if dtype_str == "torch.float32":
+        return torch.float32
+    elif dtype_str == "torch.float16":
+        return torch.float16
+    elif dtype_str == "torch.bfloat16":
+        return torch.bfloat16
+    else:
+        raise ValueError(f"Invalid dtype: {dtype_str}")
+
 def set_seed_all(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)

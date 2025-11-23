@@ -120,23 +120,25 @@ class GroupedQueryAttention(nn.Module):
         cos, sin = self.rotary_emb(value_states, seq_length)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        # repeat k/v heads for GQA
-        key_states = key_states.repeat_interleave(self.num_key_value_groups, dim=1)
-        value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
+        # Repeat k/v heads if num_key_value_heads < num_heads (for GQA)
+        if self.num_key_value_heads != self.num_heads:
+            key_states = key_states.repeat_interleave(self.num_key_value_groups, dim=1)
+            value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states, key_states, value_states,
+            attn_mask=None,
+            dropout_p=self.config.attention_dropout if self.training else 0.0,
+            is_causal=True,
+        )
         
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        # Reshape and project
+        # Reshape output back
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_length, self.hidden_size)
+        
+        # Final output projection
         attn_output = self.o_proj(attn_output)
-
+        
         return attn_output
 
 class MLP(nn.Module):

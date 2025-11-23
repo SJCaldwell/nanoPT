@@ -33,9 +33,9 @@ class MFUTracker:
         # Different flops for different precisions
         peak_flops_map = {
             "H100": {
-                torch.float32: 989e12,     # TF32 Tensor Cores (Torch default for float32)
-                torch.float16: 1979e12,    # FP16 Tensor Cores
-                torch.bfloat16: 1979e12,   # BF16 Tensor Cores
+                torch.float32: 494.7e12,     # TF32 Tensor Cores (Torch default for float32)
+                torch.float16: 989.4e12,    # FP16 Tensor Cores
+                torch.bfloat16: 989.4e12,   # BF16 Tensor Cores
             },
             "A100": {
                 torch.float32: 19.5e12,    # FP32

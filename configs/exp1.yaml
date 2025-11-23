@@ -2,7 +2,7 @@ seed: 42
 project_name: "nanopt-llama-3.2-1b-pretrain"
 learning_rate: 3e-4
 warmup_steps: 1000
-per_device_batch_size: 1
+per_device_batch_size: 4
 tokenizer_name: "meta-llama/Llama-3.2-1B"
 max_length: 4096
 num_workers: 10
@@ -12,3 +12,4 @@ eval_interval: 10
 mfu_log_interval: 10
 enable_profiling: true
 profiling_dir: "/training/profiling/"
+dtype: "torch.bfloat16"

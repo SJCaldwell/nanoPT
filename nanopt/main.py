@@ -1,6 +1,6 @@
 import wandb
 import yaml
-from nanopt.common import ddp_setup, set_seed_all, save_checkpoint
+from nanopt.common import ddp_setup, set_seed_all, save_checkpoint, get_dtype
 from nanopt.models.llama import LlamaForCausalLM, LlamaConfig
 from nanopt.data import get_dataloaders
 from nanopt.optimizers.adamw import create_optimizer, get_lr_scheduler
@@ -13,7 +13,6 @@ import math
 from torch.utils.data import DataLoader
 from nanopt.profiling.track_mfu import MFUTracker
 import contextlib
-
 
 class TrainConfig(BaseModel):
     seed: int = 42
@@ -34,6 +33,7 @@ class TrainConfig(BaseModel):
     profiling_dir: str = "training"
     profiling_wait_steps: int = 10 # skip initial warmup
     profiling_active_steps: int = 20 # profile these
+    dtype: str = "torch.bfloat16"
 
 
 def evaluate_model(
@@ -65,11 +65,18 @@ def train_model(
 
     print(config)
 
+    flash_available = torch.backends.cuda.flash_sdp_enabled()
+    if not flash_available:
+        raise ValueError("Flash Attention is not available. Check your torch version")
+    
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"Flash Attention available: {flash_available}")
     if world_size > 1 and not torch.cuda.is_available():
         raise ValueError("Distributed training requires CUDA")
 
+    dtype = get_dtype(config.dtype)
     # get total number of gpus in the world (assume homogeneity)
-
     gradient_accumulation_steps = config.tokens_per_batch // (config.per_device_batch_size * world_size * config.sequence_length)
     # need to calculate max steps based on target number of tokens to give to the lr scheduler
     max_steps = 20_000_000_000 // config.tokens_per_batch
@@ -85,8 +92,8 @@ def train_model(
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     model = LlamaForCausalLM(LlamaConfig()) # default config is for Llama 3.2 1B
-    model.to(device)
-    mfu_tracker = MFUTracker(model, config.per_device_batch_size * config.sequence_length * world_size, device, dtype=torch.float32)
+    model.to(device, dtype=dtype)
+    mfu_tracker = MFUTracker(model, config.per_device_batch_size * config.sequence_length, device, dtype=dtype)
     optimizer = create_optimizer(model, lr=config.learning_rate)
     scheduler = get_lr_scheduler(optimizer, warmup_steps=config.warmup_steps, max_steps=max_steps)
 
