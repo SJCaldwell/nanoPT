@@ -93,7 +93,12 @@ def train_model(
 
     model = LlamaForCausalLM(LlamaConfig()) # default config is for Llama 3.2 1B
     model.to(device, dtype=dtype)
-    mfu_tracker = MFUTracker(model, config.per_device_batch_size * config.sequence_length, device, dtype=dtype)
+    model = torch.nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[local_rank],
+        output_device=local_rank,
+    )
+    mfu_tracker = MFUTracker(model.module if hasattr(model, 'module') else model, config.per_device_batch_size * config.sequence_length * world_size, device, world_size=world_size, dtype=dtype)
     optimizer = create_optimizer(model, lr=config.learning_rate)
     scheduler = get_lr_scheduler(optimizer, warmup_steps=config.warmup_steps, max_steps=max_steps)
 
@@ -148,6 +153,7 @@ def train_model(
                     "real_step": real_step,
                 })
             if (i + 1) % gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -178,12 +184,12 @@ def train_model(
                             "val_loss": val_loss,
                             "real_step": real_step,
                         })
-                        example_generation = model.generate("An interesting fact about the human brain", device=device, max_new_tokens=100)
+                        example_generation = model.module.generate("An interesting fact about the human brain", device=device, max_new_tokens=100) if hasattr(model, 'module') else model.generate("An interesting fact about the human brain", device=device, max_new_tokens=100)
                         wandb.log({
                             "example_generation_brain": example_generation,
                             "real_step": real_step,
                         })
-                        example_generation = model.generate("It was a dark and stormy night", device=device, max_new_tokens=100)
+                        example_generation = model.module.generate("It was a dark and stormy night", device=device, max_new_tokens=100) if hasattr(model, 'module') else model.generate("It was a dark and stormy night", device=device, max_new_tokens=100)
                         wandb.log({
                             "example_generation_stormy": example_generation,
                             "real_step": real_step,

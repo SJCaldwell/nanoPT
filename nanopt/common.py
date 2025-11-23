@@ -34,7 +34,7 @@ def save_checkpoint(
     Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     checkpoint = {
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'step': step,

@@ -9,16 +9,19 @@ class MFUTracker:
         model: torch.nn.Module,
         tokens_per_step: int,
         device: torch.device,
+        world_size: int,
         dtype: Optional[torch.dtype] = None,
         flops_promised: Optional[float] = None,
     ):
         self.model = model
         self.tokens_per_step = tokens_per_step
         self.device = device
+        self.world_size = world_size
         self.dtype = dtype or torch.float32
         self.flops_per_token = self._calculate_model_flops()
 
-        self.flops_promised = flops_promised or self._get_device_peak_flops()
+        self.single_gpu_flops_promised = flops_promised or self._get_device_peak_flops()
+        self.flops_promised = self.single_gpu_flops_promised * self.world_size
     
     def _calculate_model_flops(self) -> float:
         """Calculates the model FLOPs per token."""

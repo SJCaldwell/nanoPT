@@ -23,6 +23,8 @@ TRAINING_OUTPUT_VOLUME_NAME = "nanopt-llama-3.2-1b-training-output"
 single_node_gpus = 1
 n_proc_per_node = 1
 
+multi_node_gpus = 8
+
 base_image = (
     modal.Image.from_registry(f"nvidia/cuda:{tag}", add_python="3.13")
     .apt_install("git", "libibverbs-dev", "libibverbs1")
@@ -65,8 +67,38 @@ def _train_single_node(
         config_path
     ]
     run(parse_args(args))
+
+@app.function(
+    gpu=f"H100:{multi_node_gpus}",
+    secrets=[
+        modal.Secret.from_name("wandb-secret"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+    volumes={
+        "/data": dataset_volume,
+        "/training": training_volume,
+    },
+    timeout=60 * 60 * 12,  # 12 hours
+)
+def _train_multi_node(
+    config_path: str = "configs/exp1.yaml"
+) -> None:
+    from torch.distributed.run import parse_args, run
+
+    args = [
+        f"--nproc-per-node={multi_node_gpus}",
+        "-m", "nanopt.main",
+        config_path
+    ]
+    run(parse_args(args))
+
 # Convenience functions for common training scenarios
 @app.local_entrypoint()
 def train_single_node():
     """Run small model training on single node."""
     _train_single_node.remote(config_path="configs/exp1.yaml")
+
+@app.local_entrypoint()
+def train_multi_node():
+    """Run small model training on multiple nodes."""
+    _train_multi_node.remote(config_path="configs/exp1.yaml")
